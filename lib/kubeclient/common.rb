@@ -1,5 +1,7 @@
 require 'json'
 require 'rest-client'
+require 'googleauth'
+
 module Kubeclient
   # Common methods
   # this is mixed in by other gems
@@ -18,7 +20,8 @@ module Kubeclient
       username:          nil,
       password:          nil,
       bearer_token:      nil,
-      bearer_token_file: nil
+      bearer_token_file: nil,
+      use_default_gcp:   nil
     }.freeze
 
     DEFAULT_SOCKET_OPTIONS = {
@@ -70,6 +73,9 @@ module Kubeclient
       elsif auth_options[:bearer_token_file]
         validate_bearer_token_file
         bearer_token(File.read(@auth_options[:bearer_token_file]))
+      elsif auth_options[:use_default_gcp]
+        token = use_default_gcp_token
+        bearer_token(token) if token
       end
     end
 
@@ -98,12 +104,7 @@ module Kubeclient
     def handle_exception
       yield
     rescue RestClient::Exception => e
-      json_error_msg = begin
-        JSON.parse(e.response || '') || {}
-      rescue JSON::ParserError
-        {}
-      end
-      err_message = json_error_msg['message'] || e.message
+      err_message = json_error_message(e.response) || e.message
       raise KubeException.new(e.http_code, err_message, e.response)
     end
 
@@ -445,10 +446,10 @@ module Kubeclient
     def validate_auth_options(opts)
       # maintain backward compatibility:
       opts[:username] = opts[:user] if opts[:user]
-
-      if [:bearer_token, :bearer_token_file, :username].count { |key| opts[key] } > 1
+      exclusive_keys = [:bearer_token, :bearer_token_file, :username, :use_default_gcp]
+      if exclusive_keys.count { |key| opts[key] } > 1
         fail(ArgumentError, 'Invalid auth options: specify only one of username/password,' \
-             ' bearer_token or bearer_token_file')
+             ' bearer_token, bearer_token_file, or use_default_gcp')
       elsif [:username, :password].count { |key| opts[key] } == 1
         fail(ArgumentError, 'Basic auth requires both username & password')
       end
@@ -483,6 +484,27 @@ module Kubeclient
       end
 
       options.merge(@socket_options)
+    end
+
+    def use_default_gcp_token
+      scopes =  ['https://www.googleapis.com/auth/cloud-platform']
+      authorization = Google::Auth.get_application_default(scopes)
+
+      authorization.apply({})
+
+      authorization.access_token
+    rescue Signet::AuthorizationError => e
+      err_message = json_error_message(e.response.body) || e.message
+      raise KubeException.new(e.response.status, err_message, e.response.body)
+    end
+
+    def json_error_message(body)
+      json_error_msg = begin
+        JSON.parse(body || '') || {}
+      rescue JSON::ParserError
+        {}
+      end
+      json_error_msg['message']
     end
   end
 end

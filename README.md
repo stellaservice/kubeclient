@@ -118,6 +118,18 @@ client = Kubeclient::Client.new 'https://localhost:8443/api/' , 'v1',
                                 auth_options: auth_options
 ```
 
+If your system is already configured with Google's application default credential as described
+[here](https://developers.google.com/identity/protocols/application-default-credentials)
+then you can use the following:
+
+```ruby
+auth_options = {
+  use_default_gcp: true
+}
+client = Kubeclient::Client.new 'https://localhost:8443/api/' , 'v1',
+                                auth_options: auth_options
+```
+
 If you are running your app using kubeclient inside a Kubernetes cluster, then you can have a bearer token file
 mounted inside your pod by using a
 [Service Account](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/design/service_accounts.md). This

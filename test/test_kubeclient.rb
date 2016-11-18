@@ -1,7 +1,18 @@
 require 'test_helper'
+require 'signet/errors'
 
 # Kubernetes client entity tests
 class KubeClientTest < MiniTest::Test
+  # Used to stub responses from RestClient in exceptions
+  class RestClientResponseStub < String
+    attr_reader :code
+
+    def initialize(body, code)
+      @code = code
+      super(body)
+    end
+  end
+
   def test_json
     our_object = Kubeclient::Resource.new
     our_object.foo = 'bar'
@@ -389,11 +400,13 @@ class KubeClientTest < MiniTest::Test
   def test_api_bearer_token_failure
     error_message = '"/api/v1" is forbidden because ' \
                     'system:anonymous cannot list on pods in'
-    response = OpenStruct.new(code: 401, message: error_message)
+    response = RestClientResponseStub.new('', 403)
+    exception = RestClient::Exception.new(response)
+    exception.message = error_message
 
     stub_request(:get, 'http://localhost:8080/api/v1')
       .with(headers: { Authorization: 'Bearer invalid_token' })
-      .to_raise(KubeException.new(403, error_message, response))
+      .to_raise(exception)
 
     client = Kubeclient::Client.new('http://localhost:8080/api/',
                                     auth_options: {
@@ -454,10 +467,12 @@ class KubeClientTest < MiniTest::Test
 
   def test_api_basic_auth_failure
     error_message = 'HTTP status code 401, 401 Unauthorized'
-    response = OpenStruct.new(code: 401, message: '401 Unauthorized')
+    response = RestClientResponseStub.new('401 Unauthorized', 401)
+    exception = RestClient::Exception.new(response)
+    exception.message = error_message
 
     stub_request(:get, 'http://username:password@localhost:8080/api/v1')
-      .to_raise(KubeException.new(401, error_message, response))
+      .to_raise(exception)
 
     client = Kubeclient::Client.new('http://localhost:8080/api/',
                                     auth_options: {
@@ -498,7 +513,7 @@ class KubeClientTest < MiniTest::Test
 
   def test_init_username_and_bearer_token
     expected_msg = 'Invalid auth options: specify only one of username/password,' \
-                   ' bearer_token or bearer_token_file'
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
     exception = assert_raises(ArgumentError) do
       Kubeclient::Client.new('http://localhost:8080',
                              auth_options: {
@@ -509,14 +524,14 @@ class KubeClientTest < MiniTest::Test
     assert_equal(expected_msg, exception.message)
   end
 
-  def test_init_user_and_bearer_token
+  def test_init_username_and_bearer_token_file
     expected_msg = 'Invalid auth options: specify only one of username/password,' \
-                   ' bearer_token or bearer_token_file'
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
     exception = assert_raises(ArgumentError) do
       Kubeclient::Client.new('http://localhost:8080',
                              auth_options: {
                                username: 'username',
-                               bearer_token: 'token'
+                               bearer_token_file: 'token-file'
                              })
     end
     assert_equal(expected_msg, exception.message)
@@ -524,12 +539,51 @@ class KubeClientTest < MiniTest::Test
 
   def test_bearer_token_and_bearer_token_file
     expected_msg = 'Invalid auth options: specify only one of username/password,' \
-                   ' bearer_token or bearer_token_file'
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
     exception = assert_raises(ArgumentError) do
       Kubeclient::Client.new('http://localhost:8080',
                              auth_options: {
                                bearer_token: 'token',
                                bearer_token_file: 'token-file'
+                             })
+    end
+    assert_equal(expected_msg, exception.message)
+  end
+
+  def test_username_and_use_default_gcp
+    expected_msg = 'Invalid auth options: specify only one of username/password,' \
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
+    exception = assert_raises(ArgumentError) do
+      Kubeclient::Client.new('http://localhost:8080',
+                             auth_options: {
+                               username: 'username',
+                               use_default_gcp: true
+                             })
+    end
+    assert_equal(expected_msg, exception.message)
+  end
+
+  def test_bearer_token_and_use_default_gcp
+    expected_msg = 'Invalid auth options: specify only one of username/password,' \
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
+    exception = assert_raises(ArgumentError) do
+      Kubeclient::Client.new('http://localhost:8080',
+                             auth_options: {
+                               bearer_token: 'token',
+                               use_default_gcp: true
+                             })
+    end
+    assert_equal(expected_msg, exception.message)
+  end
+
+  def test_bearer_token_file_and_use_default_gcp
+    expected_msg = 'Invalid auth options: specify only one of username/password,' \
+                   ' bearer_token, bearer_token_file, or use_default_gcp'
+    exception = assert_raises(ArgumentError) do
+      Kubeclient::Client.new('http://localhost:8080',
+                             auth_options: {
+                               bearer_token_file: 'token-file',
+                               use_default_gcp: true
                              })
     end
     assert_equal(expected_msg, exception.message)
@@ -565,6 +619,55 @@ class KubeClientTest < MiniTest::Test
 
     assert_equal('Pod', pods.kind)
     assert_equal(1, pods.size)
+  end
+
+  def test_auth_use_default_gcp_success
+    stub_request(:get, %r{/api/v1$})
+      .to_return(body: open_test_file('core_api_resource_list.json'),
+                 status: 200)
+    stub_request(:get, 'http://localhost:8080/api/v1/pods')
+      .with(headers: { Authorization: 'Bearer valid_token' })
+      .to_return(body: open_test_file('pod_list.json'),
+                 status: 200)
+
+    auth = Minitest::Mock.new
+    auth.expect(:apply, nil, [{}])
+    auth.expect(:access_token, 'valid_token')
+    Google::Auth.stub(:get_application_default, auth) do
+      client = Kubeclient::Client.new('http://localhost:8080/api/',
+                                      auth_options: {
+                                        use_default_gcp: true
+                                      })
+      pods = client.get_pods
+
+      assert_equal('Pod', pods.kind)
+      assert_equal(1, pods.size)
+    end
+  end
+
+  def test_auth_use_default_gcp_failure
+    stub_request(:get, %r{/api/v1$})
+      .to_return(body: open_test_file('core_api_resource_list.json'),
+                 status: 200)
+
+    expected_msg = 'Authorization failed.'
+    response = OpenStruct.new(body: '', status: 401)
+    auth = Minitest::Mock.new
+    auth.expect(:apply, nil) do
+      fail Signet::AuthorizationError.new(expected_msg, response: response)
+    end
+
+    exception = assert_raises(KubeException) do
+      Google::Auth.stub(:get_application_default, auth) do
+        Kubeclient::Client.new('http://localhost:8080',
+                               auth_options: {
+                                 use_default_gcp: true
+                               })
+      end
+    end
+
+    assert_equal(401, exception.error_code)
+    assert_equal(expected_msg, exception.message)
   end
 
   def test_proxy_url
